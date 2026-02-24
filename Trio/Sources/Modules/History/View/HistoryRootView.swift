@@ -2,7 +2,7 @@ import CoreData
 import SwiftUI
 import Swinject
 
-extension DataTable {
+extension History {
     struct RootView: BaseView {
         let resolver: Resolver
 
@@ -201,12 +201,15 @@ extension DataTable {
                         HStack(spacing: 20) {
                             Image(
                                 systemName: selectedTreatmentTypes.count == TreatmentType.allCases.count
-                                    ? "checkmark.circle.fill" : "circle"
+                                    ? "checkmark.square.fill" : "square"
                             )
                             .frame(width: 20)
                             .foregroundColor(Color.accentColor)
-                            Text(selectedTreatmentTypes.count == TreatmentType.allCases.count ? "Deselect All" : "Select All")
-                                .foregroundColor(Color.primary)
+                            Text(
+                                selectedTreatmentTypes.count == TreatmentType.allCases
+                                    .count ? String(localized: "Deselect All") : String(localized: "Select All")
+                            )
+                            .foregroundColor(Color.primary)
                         }.padding(4)
                     }
                     .buttonStyle(.borderless)
@@ -220,7 +223,7 @@ extension DataTable {
                             HStack(spacing: 20) {
                                 Image(
                                     systemName: selectedTreatmentTypes
-                                        .contains(treatmentType) ? "checkmark.circle.fill" : "circle"
+                                        .contains(treatmentType) ? "checkmark.square.fill" : "square"
                                 )
                                 .frame(width: 20)
                                 .foregroundColor(Color.accentColor)
@@ -252,7 +255,7 @@ extension DataTable {
                 },
                 label: {
                     HStack {
-                        Text(showFutureEntries ? "Hide Future" : "Show Future")
+                        Text(showFutureEntries ? String(localized: "Hide Future") : String(localized: "Show Future"))
                             .foregroundColor(Color.accentColor)
                         Image(systemName: showFutureEntries ? "eye.slash" : "eye")
                             .foregroundColor(Color.accentColor)
@@ -308,7 +311,7 @@ extension DataTable {
                     }
                 } else {
                     ContentUnavailableView(
-                        "No data.",
+                        String(localized: "No data."),
                         systemImage: "syringe"
                     )
                 }
@@ -328,7 +331,7 @@ extension DataTable {
                     }
                 } else {
                     ContentUnavailableView(
-                        "No data.",
+                        String(localized: "No data."),
                         systemImage: "fork.knife"
                     )
                 }
@@ -347,7 +350,7 @@ extension DataTable {
                     }
                 } else {
                     ContentUnavailableView(
-                        "No data.",
+                        String(localized: "No data."),
                         systemImage: "clock.arrow.2.circlepath"
                     )
                 }
@@ -523,7 +526,7 @@ extension DataTable {
                     }
                 } else {
                     ContentUnavailableView(
-                        "No data.",
+                        String(localized: "No data."),
                         systemImage: "drop.fill"
                     )
                 }
@@ -608,7 +611,7 @@ extension DataTable {
         private var filterEntriesButton: some View {
             Button(action: { showFutureEntries.toggle() }, label: {
                 HStack {
-                    Text(showFutureEntries ? "Hide Future" : "Show Future")
+                    Text(showFutureEntries ? String(localized: "Hide Future") : String(localized: "Show Future"))
                         .foregroundColor(Color.secondary)
                     Image(systemName: showFutureEntries ? "calendar.badge.minus" : "calendar.badge.plus")
                 }.frame(maxWidth: .infinity, alignment: .trailing)
@@ -621,7 +624,7 @@ extension DataTable {
                     Image(systemName: "circle.fill").foregroundColor(Color.insulin)
                     Text(bolus.isSMB ? "SMB" : item.type ?? "Bolus")
                     Text(
-                        (Formatter.decimalFormatterWithTwoFractionDigits.string(from: amount) ?? "0") +
+                        (Formatter.decimalFormatterWithThreeFractionDigits.string(from: amount) ?? "0") +
                             String(localized: " U", comment: "Insulin unit")
                     )
                     .foregroundColor(.secondary)
@@ -632,7 +635,7 @@ extension DataTable {
                     Image(systemName: "circle.fill").foregroundColor(Color.insulin.opacity(0.4))
                     Text("Temp Basal")
                     Text(
-                        (Formatter.decimalFormatterWithTwoFractionDigits.string(from: rate) ?? "0") +
+                        (Formatter.decimalFormatterWithThreeFractionDigits.string(from: rate) ?? "0") +
                             String(localized: " U/hr", comment: "Unit insulin per hour")
                     )
                     .foregroundColor(.secondary)
@@ -657,7 +660,7 @@ extension DataTable {
                             alertTitle = String(localized: "Delete Insulin?", comment: "Alert title for deleting insulin")
                             alertMessage = Formatter.dateFormatter
                                 .string(from: item.timestamp ?? Date()) + ", " +
-                                (Formatter.decimalFormatterWithTwoFractionDigits.string(from: item.bolus?.amount ?? 0) ?? "0") +
+                                (Formatter.decimalFormatterWithThreeFractionDigits.string(from: item.bolus?.amount ?? 0) ?? "0") +
                                 String(localized: " U", comment: "Insulin unit")
 
                             if let bolus = item.bolus {
