@@ -20,20 +20,6 @@ struct ForecastChart: View {
             )) // min is 1.5h -> (1.5*1h = 1.5*(5*12*60))
     }
 
-    private var glucoseFormatter: NumberFormatter {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-
-        if state.units == .mmolL {
-            formatter.maximumFractionDigits = 1
-            formatter.minimumFractionDigits = 1
-            formatter.roundingMode = .halfUp
-        } else {
-            formatter.maximumFractionDigits = 0
-        }
-        return formatter
-    }
-
     private var selectedGlucose: GlucoseStored? {
         guard let selection = selection else { return nil }
         let range = selection.addingTimeInterval(-150) ... selection.addingTimeInterval(150)
@@ -73,8 +59,11 @@ struct ForecastChart: View {
 
             HStack {
                 Image(systemName: "syringe.fill")
-                Text("\(state.amount.description) U")
+                Text(
+                    "\(Formatter.bolusFormatter.string(from: state.amount as NSNumber) ?? state.amount.description) "
+                ) + Text(String(localized: "U", comment: "Insulin unit"))
             }
+
             .font(.footnote)
             .foregroundStyle(.blue)
             .padding(8)
@@ -146,7 +135,7 @@ struct ForecastChart: View {
                     .lineStyle(.init(lineWidth: 2))
                     .annotation(
                         position: .top,
-                        overflowResolution: .init(x: .fit(to: .chart), y: .disabled)
+                        overflowResolution: .init(x: .fit(to: .chart), y: .fit(to: .chart))
                     ) {
                         selectionPopover
                     }
@@ -185,19 +174,19 @@ struct ForecastChart: View {
                 HStack(spacing: 10) {
                     HStack(spacing: 4) {
                         Image(systemName: "circle.fill").foregroundStyle(Color.insulin)
-                        Text("IOB").foregroundStyle(Color.secondary)
+                        Text(String(localized: "IOB")).foregroundStyle(Color.secondary)
                     }
                     HStack(spacing: 4) {
                         Image(systemName: "circle.fill").foregroundStyle(Color.uam)
-                        Text("UAM").foregroundStyle(Color.secondary)
+                        Text(String(localized: "UAM")).foregroundStyle(Color.secondary)
                     }
                     HStack(spacing: 4) {
                         Image(systemName: "circle.fill").foregroundStyle(Color.zt)
-                        Text("ZT").foregroundStyle(Color.secondary)
+                        Text(String(localized: "ZT")).foregroundStyle(Color.secondary)
                     }
                     HStack(spacing: 4) {
                         Image(systemName: "circle.fill").foregroundStyle(Color.orange)
-                        Text("COB").foregroundStyle(Color.secondary)
+                        Text(String(localized: "COB")).foregroundStyle(Color.secondary)
                     }
                 }.font(.caption2)
             }
@@ -232,12 +221,22 @@ struct ForecastChart: View {
                     glucoseColorScheme: state.glucoseColorScheme
                 )
                 HStack {
-                    Text(state.units == .mgdL ? Decimal(sgv).description : Decimal(sgv).formattedAsMmolL)
+                    Text("CGM: ") + Text(state.units == .mgdL ? Decimal(sgv).description : Decimal(sgv).formattedAsMmolL)
                         .bold()
                         + Text(" \(state.units.rawValue)")
                 }.foregroundStyle(
                     Color(glucoseColor)
                 ).font(.footnote)
+
+                if state.isSmoothingEnabled, let smoothedGlucose = selectedGlucose?.smoothedGlucose {
+                    let smoothedGlucoseToDisplay: Decimal = state.units == .mgdL
+                        ? smoothedGlucose.decimalValue
+                        : smoothedGlucose.decimalValue.asMmolL
+                    HStack {
+                        Image(systemName: "sparkles")
+                        Text(smoothedGlucoseToDisplay.description) + Text(" \(state.units.rawValue)")
+                    }.font(.footnote)
+                }
             }
             .padding(7)
             .background {
@@ -270,24 +269,36 @@ struct ForecastChart: View {
                 glucoseColorScheme: state.glucoseColorScheme
             )
 
-            if !state.isSmoothingEnabled {
-                PointMark(
-                    x: .value("Time", item.date ?? Date(), unit: .second),
-                    y: .value("Value", glucoseToDisplay)
-                )
-                .foregroundStyle(pointMarkColor)
-                .symbolSize(18)
-            } else {
-                PointMark(
-                    x: .value("Time", item.date ?? Date(), unit: .second),
-                    y: .value("Value", glucoseToDisplay)
-                )
-                .symbol {
-                    Image(systemName: "record.circle.fill")
-                        .font(.system(size: 6))
+            PointMark(
+                x: .value("Time", item.date ?? Date(), unit: .second),
+                y: .value("Value", glucoseToDisplay)
+            )
+            .foregroundStyle(pointMarkColor)
+            .symbol {
+                if item.isManual {
+                    Image(systemName: "drop.fill")
+                        .font(.caption2)
+                        .symbolRenderingMode(.monochrome)
+                        .bold()
+                        .foregroundStyle(.red)
+                } else {
+                    Image(systemName: "circle.fill")
+                        .font(.system(size: 4))
                         .bold()
                         .foregroundStyle(pointMarkColor)
                 }
+            }
+
+            if state.isSmoothingEnabled, let smoothedGlucose = item.smoothedGlucose, smoothedGlucose != 0 {
+                let smoothedGlucoseForDisplay: Decimal = state.units == .mgdL
+                    ? smoothedGlucose.decimalValue
+                    : smoothedGlucose.decimalValue.asMmolL
+                LineMark(
+                    x: .value("Time", item.date ?? Date(), unit: .second),
+                    y: .value("Value", smoothedGlucoseForDisplay),
+                    series: .value("Type", "Smoothed")
+                )
+                .foregroundStyle(Color.secondary)
             }
         }
     }
