@@ -83,24 +83,19 @@ struct SettingInputSection<VerboseHint: View>: View {
             },
             header: { headerText.map(Text.init) },
             footer: { footerText.map(Text.init) }
-        ).listRowBackground(Color.chart)
+        )
+        .settingsSearchTarget(label: label)
     }
 
     // Helper function to retrieve PickerSetting based on key
     private func getPickerSetting(for key: String) -> PickerSetting? {
         switch key {
-        case "lowGlucose":
-            return pickerSettingsProvider.settings.lowGlucose
-        case "highGlucose":
-            return pickerSettingsProvider.settings.highGlucose
         case "carbsRequiredThreshold":
             return pickerSettingsProvider.settings.carbsRequiredThreshold
         case "individualAdjustmentFactor":
             return pickerSettingsProvider.settings.individualAdjustmentFactor
         case "delay":
             return pickerSettingsProvider.settings.delay
-        case "timeCap":
-            return pickerSettingsProvider.settings.timeCap
         case "minuteInterval":
             return pickerSettingsProvider.settings.minuteInterval
         case "high":
@@ -241,7 +236,7 @@ struct SettingInputSection<VerboseHint: View>: View {
         }.padding(.top)
     }
 
-    private func hintSection(
+    public func hintSection(
         miniHint: String,
         shouldDisplayHint: Binding<Bool>,
         verboseHint: VerboseHint,

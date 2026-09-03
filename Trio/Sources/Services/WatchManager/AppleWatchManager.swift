@@ -25,6 +25,7 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
     @Injected() private var tempTargetStorage: TempTargetsStorage!
     @Injected() private var bolusCalculationManager: BolusCalculationManager!
     @Injected() private var iobService: IOBService!
+    @Injected() private var notificationsManager: UserNotificationsManager!
 
     private var units: GlucoseUnits = .mgdL
     private var glucoseColorScheme: GlucoseColorScheme = .staticColor
@@ -40,7 +41,6 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
 
     typealias PumpEvent = PumpEventStored.EventType
 
-    let backgroundContext = CoreDataStack.shared.newTaskContext()
     let viewContext = CoreDataStack.shared.persistentContainer.viewContext
 
     init(resolver: Resolver) {
@@ -60,7 +60,7 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
 
         // Observer for OrefDetermination and adjustments
         coreDataPublisher =
-            changedObjectsOnManagedObjectContextDidSavePublisher()
+            CoreDataStack.shared.entityChangePublisher
                 .receive(on: queue)
                 .share()
                 .eraseToAnyPublisher()
@@ -183,6 +183,9 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
             return WatchState(date: Date())
         }
         do {
+            let context = CoreDataStack.shared.newTaskContext()
+            context.name = "setupWatchState"
+
             // Get NSManagedObjectIDs
             let glucoseIds = try await fetchGlucose()
             let determinationIds = try await determinationStorage.fetchLastDeterminationObjectID(
@@ -193,15 +196,15 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
 
             // Get NSManagedObjects
             let glucoseObjects: [GlucoseStored] = try await CoreDataStack.shared
-                .getNSManagedObject(with: glucoseIds, context: backgroundContext)
+                .getNSManagedObject(with: glucoseIds, context: context)
             let determinationObjects: [OrefDetermination] = try await CoreDataStack.shared
-                .getNSManagedObject(with: determinationIds, context: backgroundContext)
+                .getNSManagedObject(with: determinationIds, context: context)
             let overridePresetObjects: [OverrideStored] = try await CoreDataStack.shared
-                .getNSManagedObject(with: overridePresetIds, context: backgroundContext)
+                .getNSManagedObject(with: overridePresetIds, context: context)
             let tempTargetPresetObjects: [TempTargetStored] = try await CoreDataStack.shared
-                .getNSManagedObject(with: tempTargetPresetIds, context: backgroundContext)
+                .getNSManagedObject(with: tempTargetPresetIds, context: context)
 
-            return await backgroundContext.perform {
+            return await context.perform {
                 var watchState = WatchState(date: Date())
 
                 // Set lastLoopDate
@@ -352,6 +355,74 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
                 watchState.bolusIncrement = self.settingsManager.preferences.bolusIncrement
                 watchState.confirmBolusFaster = self.settingsManager.settings.confirmBolusFaster
 
+                watchState.showForecast = self.settingsManager.settings.showForecastWatch
+                watchState.isForecastCone = self.settingsManager.settings.forecastDisplayType == .cone
+
+                // Forecast data comes from OrefDetermination's `forecasts` CoreData
+                // relationship (Set<Forecast>), NOT a `.predictions` property.
+                if let latestDetermination = determinationObjects.first,
+                   let forecastsSet = latestDetermination.forecasts,
+                   !forecastsSet.isEmpty
+                {
+                    let anchorDate = latestDetermination.deliverAt ?? latestDetermination.timestamp ?? Date()
+                    watchState.forecastStartDate = anchorDate
+
+                    // Rebuild a [type: [Int]] dictionary from the CoreData relationship.
+                    // Strictly cap to 24 points (2 hours of 5-minute forecasts)
+                    var rawPredictions: [String: [Int]] = [:]
+                    for forecast in forecastsSet {
+                        guard let type = forecast.type else { continue }
+                        let values = Array(forecast.forecastValuesArray.map { Int($0.value) }.prefix(24))
+                        guard !values.isEmpty else { continue }
+                        rawPredictions[type] = values
+                    }
+
+                    func convert(_ values: [Int]?) -> [Double] {
+                        guard let values = values else { return [] }
+                        return values.map { raw in
+                            self.units == .mgdL ? Double(raw) : Double(truncating: Decimal(raw).asMmolL as NSNumber)
+                        }
+                    }
+
+                    if watchState.isForecastCone {
+                        let allSeries: [[Int]] = [
+                            rawPredictions["iob"],
+                            rawPredictions["zt"],
+                            rawPredictions["cob"],
+                            rawPredictions["uam"]
+                        ].compactMap { $0 }
+
+                        // Change .max() to .min() so the shortest prediction line cuts off the cone
+                        let count = allSeries.map(\.count).min() ?? 0
+
+                        var coneMin: [Double] = []
+                        var coneMax: [Double] = []
+                        for i in 0 ..< count {
+                            let valuesAtIndex = allSeries.compactMap { $0.indices.contains(i) ? $0[i] : nil }
+                            guard let minRaw = valuesAtIndex.min(), let maxRaw = valuesAtIndex.max() else { continue }
+                            coneMin.append(convert([minRaw])[0])
+                            coneMax.append(convert([maxRaw])[0])
+                        }
+                        watchState.forecastConeMin = coneMin
+                        watchState.forecastConeMax = coneMax
+                        watchState.forecastLines = [:]
+                    } else {
+                        var lines: [String: [Double]] = [:]
+                        if let iob = rawPredictions["iob"] { lines["iob"] = convert(iob) }
+                        if let cob = rawPredictions["cob"] { lines["cob"] = convert(cob) }
+                        if let uam = rawPredictions["uam"] { lines["uam"] = convert(uam) }
+                        if let zt = rawPredictions["zt"] { lines["zt"] = convert(zt) }
+                        watchState.forecastLines = lines
+                        watchState.forecastConeMin = []
+                        watchState.forecastConeMax = []
+                    }
+                } else {
+                    watchState.forecastStartDate = nil
+                    watchState.forecastConeMin = []
+                    watchState.forecastConeMax = []
+                    watchState.forecastLines = [:]
+                }
+
                 debug(
                     .watchManager,
 
@@ -373,16 +444,17 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
     /// Fetches recent glucose readings from CoreData
     /// - Returns: Array of NSManagedObjectIDs for glucose readings
     private func fetchGlucose() async throws -> [NSManagedObjectID] {
+        let context = CoreDataStack.shared.newTaskContext()
+        context.name = "fetchGlucose"
         let results = try await CoreDataStack.shared.fetchEntitiesAsync(
             ofType: GlucoseStored.self,
-            onContext: backgroundContext,
+            onContext: context,
             predicate: NSPredicate.glucose,
             key: "date",
-            ascending: false,
-            fetchLimit: 288
+            ascending: false
         )
 
-        return try await backgroundContext.perform {
+        return try await context.perform {
             guard let fetchedResults = results as? [GlucoseStored] else {
                 throw CoreDataError.fetchError(function: #function, file: #file)
             }
@@ -394,16 +466,19 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
     /// Fetches last pump event that is a non-external bolus from CoreData
     /// - Returns: NSManagedObjectIDs for last bolus
     func fetchLastBolus() async throws -> NSManagedObjectID? {
+        let context = CoreDataStack.shared.newTaskContext()
+        context.name = "fetchLastBolus"
         let results = try await CoreDataStack.shared.fetchEntitiesAsync(
             ofType: PumpEventStored.self,
-            onContext: backgroundContext,
+            onContext: context,
             predicate: NSPredicate.lastPumpBolus,
             key: "timestamp",
             ascending: false,
-            fetchLimit: 1
+            fetchLimit: 1,
+            relationshipKeyPathsForPrefetching: ["bolus"]
         )
 
-        return try await backgroundContext.perform {
+        return try await context.perform {
             guard let fetchedResults = results as? [PumpEventStored] else {
                 throw CoreDataError.fetchError(function: #function, file: #file)
             }
@@ -432,7 +507,7 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
     // MARK: - Send to Watch
 
     func watchStateToDictionary(from state: WatchState) -> [String: Any] {
-        [
+        var dictionary: [String: Any] = [
             WatchMessageKeys.date: state.date.timeIntervalSince1970,
             WatchMessageKeys.currentGlucose: state.currentGlucose ?? "--",
             WatchMessageKeys.currentGlucoseColorString: state.currentGlucoseColorString ?? "#ffffff",
@@ -468,8 +543,23 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
             WatchMessageKeys.maxProtein: state.maxProtein,
             WatchMessageKeys.bolusIncrement: state.bolusIncrement,
             WatchMessageKeys.confirmBolusFaster: state.confirmBolusFaster,
-            WatchMessageKeys.units: state.units.rawValue
+            WatchMessageKeys.units: state.units.rawValue,
+            WatchMessageKeys.showForecastWatch: state.showForecast,
+            WatchMessageKeys.isForecastCone: state.isForecastCone
         ]
+
+        var forecastData: [String: Any] = [
+            WatchMessageKeys.forecastConeMin: state.forecastConeMin,
+            WatchMessageKeys.forecastConeMax: state.forecastConeMax,
+            WatchMessageKeys.forecastLines: state.forecastLines
+        ]
+
+        if let start = state.forecastStartDate?.timeIntervalSince1970 {
+            forecastData[WatchMessageKeys.forecastStartDate] = start
+        }
+
+        dictionary[WatchMessageKeys.forecastData] = forecastData
+        return dictionary
     }
 
     /// Sends the state of type WatchState to the connected Watch
@@ -494,12 +584,12 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
             return
         }
 
-        // Skip if we already sent this state or older
-        let lastSent = WatchStateSnapshot.loadLatestDateFromDisk()
-        guard lastSent < state.date else {
-            debug(.watchManager, "🕐 Skipping push — newer or equal state already sent")
-            return
-        }
+        // Stamp the snapshot with send time. Each push gets a strictly newer
+        // `date` than the previous one, which is what the watch's monotonicity
+        // dedup relies on — including watch-requested re-pushes when no CGM
+        // tick has bumped the build-time date.
+        var state = state
+        state.date = Date()
 
         let message: [String: Any] = watchStateToDictionary(from: state)
 
@@ -509,12 +599,11 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
             session.sendMessage([WatchMessageKeys.watchState: message], replyHandler: nil) { error in
                 debug(.watchManager, "❌ Error sending watch state: \(error)")
             }
-            WatchStateSnapshot.saveLatestDateToDisk(state.date)
         } else {
-            WatchStateSnapshot.saveLatestDateToDisk(state.date)
             session.transferUserInfo([WatchMessageKeys.watchState: message])
             debug(.watchManager, "📤 Transferred new WatchState snapshot via userInfo")
         }
+        WatchStateSnapshot.saveLatestDateToDisk(state.date)
     }
 
     func sendAcknowledgment(toWatch success: Bool, message: String = "", ackCode: AcknowledgmentCode) {
@@ -553,16 +642,18 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
     }
 
     func session(_: WCSession, didReceiveMessage message: [String: Any]) {
-        DispatchQueue.main.async { [weak self] in
-            if let logs = message["watchLogs"] as? String {
-                SimpleLogReporter.appendToWatchLog(logs)
-            }
+        // Handle logs first - doesn't need self, so it can run even during teardown
+        if let logs = message["watchLogs"] as? String {
+            SimpleLogReporter.appendToWatchLog(logs)
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
 
             if let requestWatchUpdate = message[WatchMessageKeys.requestWatchUpdate] as? String,
                requestWatchUpdate == WatchMessageKeys.watchState
             {
                 debug(.watchManager, "📱 Watch requested watch state data update.")
-                guard let self = self else { return }
                 // Skip if no watch is paired or app not installed
                 guard let session = self.session, session.isPaired, session.isReachable,
                       session.isWatchAppInstalled else { return }
@@ -573,19 +664,23 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
                 return
             }
 
-            if let bolusAmount = message[WatchMessageKeys.bolus] as? Double,
-               message[WatchMessageKeys.carbs] == nil,
-               message[WatchMessageKeys.date] == nil
+            if let snoozeMinutes = message[WatchMessageKeys.snoozeDuration] as? Int {
+                debug(.watchManager, "📱 Received snooze request from watch: \(snoozeMinutes) minutes")
+                await self.notificationsManager.applySnooze(for: TimeInterval(snoozeMinutes * 60))
+                return
+            } else if let bolusAmount = message[WatchMessageKeys.bolus] as? Double,
+                      message[WatchMessageKeys.carbs] == nil,
+                      message[WatchMessageKeys.date] == nil
             {
                 debug(.watchManager, "📱 Received bolus request from watch: \(bolusAmount)U")
-                self?.handleBolusRequest(Decimal(bolusAmount))
+                self.handleBolusRequest(Decimal(bolusAmount))
             } else if let carbsAmount = message[WatchMessageKeys.carbs] as? Int,
                       let timestamp = message[WatchMessageKeys.date] as? TimeInterval,
                       message[WatchMessageKeys.bolus] == nil
             {
                 let date = Date(timeIntervalSince1970: timestamp)
                 debug(.watchManager, "📱 Received carbs request from watch: \(carbsAmount)g at \(date)")
-                self?.handleCarbsRequest(carbsAmount, date)
+                self.handleCarbsRequest(carbsAmount, date)
             } else if let bolusAmount = message[WatchMessageKeys.bolus] as? Double,
                       let carbsAmount = message[WatchMessageKeys.carbs] as? Int,
                       let timestamp = message[WatchMessageKeys.date] as? TimeInterval
@@ -595,11 +690,11 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
                     .watchManager,
                     "📱 Received meal bolus combo request from watch: \(bolusAmount)U, \(carbsAmount)g at \(date)"
                 )
-                self?.handleCombinedRequest(bolusAmount: Decimal(bolusAmount), carbsAmount: Decimal(carbsAmount), date: date)
+                self.handleCombinedRequest(bolusAmount: Decimal(bolusAmount), carbsAmount: Decimal(carbsAmount), date: date)
             } else {
                 debug(.watchManager, "📱 Invalid or incomplete data received from watch. Received:  \(message)")
                 // Acknowledge failure
-                self?.sendAcknowledgment(
+                self.sendAcknowledgment(
                     toWatch: false,
                     message: "Error! Invalid or incomplete data received from watch.",
                     ackCode: .genericFailure
@@ -608,22 +703,22 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
 
             if message[WatchMessageKeys.cancelOverride] as? Bool == true {
                 debug(.watchManager, "📱 Received cancel override request from watch")
-                self?.handleCancelOverride()
+                self.handleCancelOverride()
             }
 
             if let presetName = message[WatchMessageKeys.activateOverride] as? String {
                 debug(.watchManager, "📱 Received activate override request from watch for preset: \(presetName)")
-                self?.handleActivateOverride(presetName)
+                self.handleActivateOverride(presetName)
             }
 
             if let presetName = message[WatchMessageKeys.activateTempTarget] as? String {
                 debug(.watchManager, "📱 Received activate temp target request from watch for preset: \(presetName)")
-                self?.handleActivateTempTarget(presetName)
+                self.handleActivateTempTarget(presetName)
             }
 
             if message[WatchMessageKeys.cancelTempTarget] as? Bool == true {
                 debug(.watchManager, "📱 Received cancel temp target request from watch")
-                self?.handleCancelTempTarget()
+                self.handleCancelTempTarget()
             }
 
             if message[WatchMessageKeys.requestBolusRecommendation] as? Bool == true {
@@ -635,13 +730,15 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
                     guard let self = self else { return }
 
                     do {
+                        let context = CoreDataStack.shared.newTaskContext()
+                        context.name = "requestBolusRecommendation"
                         // Fetch determination data
                         let determinationIds = try await determinationStorage.fetchLastDeterminationObjectID(
                             predicate: NSPredicate.predicateFor30MinAgoForDetermination
                         )
                         let determinationObjects: [OrefDetermination] = try await CoreDataStack.shared.getNSManagedObject(
                             with: determinationIds,
-                            context: backgroundContext
+                            context: context
                         )
 
                         await MainActor.run {
@@ -683,6 +780,14 @@ final class BaseWatchManager: NSObject, WCSessionDelegate, Injectable, WatchMana
     func session(_: WCSession, didReceiveUserInfo userInfo: [String: Any] = [:]) {
         if let logs = userInfo["watchLogs"] as? String {
             SimpleLogReporter.appendToWatchLog(logs)
+        }
+
+        if let snoozeMinutes = userInfo[WatchMessageKeys.snoozeDuration] as? Int {
+            debug(.watchManager, "📱 Received snooze userInfo from watch: \(snoozeMinutes) minutes")
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.notificationsManager.applySnooze(for: TimeInterval(snoozeMinutes * 60))
+            }
         }
     }
 

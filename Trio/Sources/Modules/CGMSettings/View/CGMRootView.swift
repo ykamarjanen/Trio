@@ -15,19 +15,10 @@ extension CGMSettings {
         @State private var decimalPlaceholder: Decimal = 0.0
         @State private var booleanPlaceholder: Bool = false
         @State var showCGMSelection: Bool = false
+        @State private var pendingCGM: CGMCatalogEntry?
 
         @Environment(\.colorScheme) var colorScheme
         @Environment(AppState.self) var appState
-
-        var cgmSelectionButtons: some View {
-            ForEach(cgmOptions, id: \.name) { option in
-                if let cgm = state.listOfCGM.first(where: option.predicate) {
-                    Button(option.name) {
-                        state.addCGM(cgm: cgm)
-                    }
-                }
-            }
-        }
 
         var body: some View {
             NavigationView {
@@ -113,17 +104,36 @@ extension CGMSettings {
                         units: state.units,
                         type: .boolean,
                         label: String(localized: "Smooth Glucose Value"),
-                        miniHint: String(localized: "Smooth CGM readings using Savitzky-Golay filtering."),
+                        miniHint: String(localized: "Smooth CGM readings using exponential smoothing."),
                         verboseHint: VStack(alignment: .leading, spacing: 10) {
                             Text("Default: OFF").bold()
+
                             Text(
-                                "This filter looks at small groups of nearby readings and fits them to a simple mathematical curve. This process doesn't change the overall pattern of your glucose data but helps smooth out the \"noise\" or irregular fluctuations that could lead to false highs or lows."
+                                "This feature smooths your CGM readings to reduce noise and make them easier to read. It is based on a method used in AndroidAPS (AAPS). It uses two approaches: one that reacts quickly to recent changes, and one that looks at longer trends. These are combined to give a balanced result."
                             )
+
                             Text(
-                                "It's designed to keep the important trends in your data while minimizing those small, misleading variations, giving you and Trio a clearer sense of where your blood sugar is really headed. This type of filtering is useful in Trio, as it can help prevent over-corrections based on inaccurate glucose readings. This can help reduce the impact of sudden spikes or dips that might not reflect your true blood glucose levels."
+                                "Trio will always display values based on your actual (raw) CGM readings. Smoothing does not change your real values or alerts."
                             )
+
+                            Text("When this feature is enabled:")
+
+                            VStack(alignment: .leading) {
+                                Text(
+                                    "• The main chart and treatment chart show a light gray trend line for the smoothed values. The glucose dots always show your original CGM readings."
+                                )
+
+                                Text("• In Trio history, you will see the smoothed value next to the original reading.")
+
+                                Text("• When you long-press a chart, the pop-up will show both the original and smoothed values.")
+                            }
+
                             Text(
-                                "Note: If enabled, the smoothed values you see in Trio may differ from what is shown in your CGM app."
+                                "It can handle small gaps in data and ignores sensor error values. It needs 4 readings in a row, each arriving within 12 minutes of the one before it, to work properly. Only CGM readings are smoothed—manual entries are not changed."
+                            )
+
+                            Text(
+                                "This helps Trio make more stable dosing decisions by avoiding over-reactions to small or short-term changes. Important trends are kept, while unreliable fluctuations are filtered out."
                             )
                         }
                     )
@@ -131,6 +141,7 @@ extension CGMSettings {
                 .scrollContentBackground(.hidden).background(appState.trioBackgroundColor(for: colorScheme))
                 .onAppear(perform: configureView)
                 .navigationTitle("CGM")
+                .settingsHighlightScroll()
                 .navigationBarTitleDisplayMode(.automatic)
                 .navigationBarItems(leading: displayClose ? Button("Close", action: state.hideModal) : nil)
                 .sheet(isPresented: $state.shouldDisplayCGMSetupSheet) {
@@ -181,22 +192,15 @@ extension CGMSettings {
                         hintDetent: $hintDetent,
                         shouldDisplayHint: $shouldDisplayHint,
                         hintLabel: hintLabel ?? "",
-                        hintText: AnyView(
+                        hintText: selectedVerboseHint ?? AnyView(
                             VStack(alignment: .leading, spacing: 10) {
                                 Text(
                                     "Current CGM Models Supported:"
                                 )
                                 VStack(alignment: .leading) {
-                                    Text("• Dexcom G5")
-                                    Text("• Dexcom G6 / ONE")
-                                    Text("• Dexcom G7 / ONE+")
-                                    Text("• Dexcom Share")
-                                    Text("• Freestyle Libre")
-                                    Text("• Freestyle Libre Demo")
-                                    Text("• Glucose Simulator")
-                                    Text("• Medtronic Enlite")
-                                    Text("• Nightscout")
-                                    Text("• xDrip4iOS")
+                                    ForEach(DeviceCatalog.cgms.filter(\.isSelectableInPicker)) { cgm in
+                                        Text("• \(cgm.hintLine)")
+                                    }
                                 }
                                 Text(
                                     "Note: The CGM Heartbeat can come from either a CGM or a pump to wake up Trio when phone is locked or in the background. If CGM is on the same phone as Trio and xDrip4iOS is configured to use the same AppGroup as Trio and the heartbeat feature is turned on in xDrip4iOS, then the CGM can provide a heartbeat to wake up Trio when phone is locked or app is in the background."
@@ -206,10 +210,20 @@ extension CGMSettings {
                         sheetTitle: String(localized: "Help", comment: "Help sheet title")
                     )
                 }
-                .confirmationDialog("CGM Model", isPresented: $showCGMSelection) {
-                    cgmSelectionButtons
-                } message: {
-                    Text("Select CGM Model")
+                // Selection is applied in onDismiss so the setup sheet is presented only once the picker is gone.
+                .sheet(isPresented: $showCGMSelection, onDismiss: {
+                    if let entry = pendingCGM {
+                        pendingCGM = nil
+                        state.addCGM(cgm: CGMModel(entry))
+                    }
+                }) {
+                    DevicePickerView(
+                        title: String(localized: "Add CGM", comment: "The title of the CGM chooser in settings"),
+                        entries: DeviceCatalog.cgms
+                    ) { entry in
+                        pendingCGM = entry
+                        showCGMSelection = false
+                    }
                 }
             }
         }

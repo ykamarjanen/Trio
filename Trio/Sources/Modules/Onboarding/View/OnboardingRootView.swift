@@ -26,8 +26,7 @@ extension Onboarding {
 
         private func updateCurrentChapter() {
             switch currentStep {
-            case .diagnostics,
-                 .nightscout,
+            case .nightscout,
                  .unitSelection:
                 currentChapter = .prepareTrio
             case .basalRates,
@@ -71,9 +70,7 @@ extension Onboarding {
 
         // Next button conditional
         private var shouldDisableNextButton: Bool {
-            (currentStep == .diagnostics && state.diagnosticsSharingOption == .enabled && !state.hasAcceptedPrivacyPolicy)
-                ||
-                (currentStep == .nightscout && didSelectNightscoutSetupOption)
+            (currentStep == .nightscout && didSelectNightscoutSetupOption)
                 ||
                 (currentStep == .nightscout && hasValidNightscoutConnection)
                 ||
@@ -296,6 +293,19 @@ struct OnboardingStepContent: View {
     @Binding var currentTargetBehaviorSubstep: TargetBehaviorSubstep
     @Bindable var state: Onboarding.StateModel
     var navigationDirection: OnboardingNavigationDirection
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
+
+    private var transition: AnyTransition {
+        if reduceMotion {
+            return .opacity
+        }
+        switch navigationDirection {
+        case .forward:
+            return .asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading))
+        case .backward:
+            return .asymmetric(insertion: .move(edge: .leading), removal: .move(edge: .trailing))
+        }
+    }
 
     var body: some View {
         ScrollViewReader { scrollProxy in
@@ -325,8 +335,6 @@ struct OnboardingStepContent: View {
                                 }
                             case .overview:
                                 OverviewStepView()
-                            case .diagnostics:
-                                DiagnosticsStepView(state: state)
                             case .nightscout:
                                 switch currentNightscoutSubstep {
                                 case .setupSelection:
@@ -377,11 +385,7 @@ struct OnboardingStepContent: View {
                                 CompletedStepView(isOnboardingCompleted: true, currentChapter: nil)
                             }
                         }
-                        .transition(
-                            navigationDirection == .forward
-                                ? .asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading))
-                                : .asymmetric(insertion: .move(edge: .leading), removal: .move(edge: .trailing))
-                        )
+                        .transition(transition)
                         .padding(.horizontal)
                         .id(currentStep.id)
                     }
@@ -464,13 +468,14 @@ struct OnboardingNavigationButtons: View {
     @Bindable var state: Onboarding.StateModel
     var shouldDisableNextButton: Bool
     var navigationDirectionChanged: (OnboardingNavigationDirection) -> Void
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
 
     var body: some View {
         HStack {
             if currentStep != .welcome {
                 Button(action: {
                     navigationDirectionChanged(.backward)
-                    withAnimation {
+                    withAnimation(reduceMotion ? .easeInOut(duration: 0.25) : .default) {
                         handleBackNavigation()
                     }
                 }) {
@@ -487,7 +492,7 @@ struct OnboardingNavigationButtons: View {
 
             Button(action: {
                 navigationDirectionChanged(.forward)
-                withAnimation {
+                withAnimation(reduceMotion ? .easeInOut(duration: 0.25) : .default) {
                     handleNextNavigation()
                 }
             }) {
@@ -593,14 +598,9 @@ struct OnboardingNavigationButtons: View {
                 currentStep = previousStep
                 currentSMBSubstep = .enableSMBAlways
 
-                switch state.pumpOptionForOnboardingUnits {
-                case .dana,
-                     .minimed:
-                    currentAutosensSubstep = .rewindResetsAutosens
-                case .omnipodDash,
-                     .omnipodEros:
-                    currentAutosensSubstep = .autosensMax
-                }
+                currentAutosensSubstep = state.pumpOptionForOnboardingUnits.reportsRewindEvents
+                    ? .rewindResetsAutosens
+                    : .autosensMax
             }
 
         case .targetBehavior:
